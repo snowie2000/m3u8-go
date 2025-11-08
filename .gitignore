@@ -1,0 +1,22 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Dependency directories
+vendor/
+
+# ffmpeg directory (auto-downloaded)
+ffmpeg/
+
+# Video files
+*.ts
+*.mp4
+*.m3u8
