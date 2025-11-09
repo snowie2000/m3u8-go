@@ -28,14 +28,19 @@ func SetCustomHeaders(headers map[string]string) {
 
 // M3U8Playlist represents the parsed M3U8 playlist
 type M3U8Playlist struct {
-	BaseURL   string
-	Segments  []string
-	IsStream  bool
-	Encrypted bool
-	KeyURL    string
-	KeyIV     string
-	Key       []byte
-	CustomKey []byte // Custom key provided by user (skips download)
+	BaseURL       string
+	Segments      []string
+	IsStream      bool
+	Encrypted     bool
+	KeyURL        string
+	KeyIV         string
+	Key           []byte
+	CustomKey     []byte   // Custom key provided by user (skips download)
+	IsFragmented  bool     // True if using fMP4 format (.m4s segments)
+	InitSegment   string   // Initialization segment for fMP4 (#EXT-X-MAP)
+	AudioSegments []string // Separate audio track segments
+	AudioInit     string   // Audio initialization segment (for fMP4)
+	HasAudio      bool     // True if separate audio track exists
 }
 
 // ParseM3U8 downloads and parses the M3U8 playlist from the given URL
@@ -108,12 +113,17 @@ func ParseM3U8FromFileWithKey(filePath string, baseURLStr string, customKey []by
 // parseM3U8Content parses M3U8 content from an io.Reader
 func parseM3U8Content(reader io.Reader, baseURL *url.URL, customKey []byte) (*M3U8Playlist, error) {
 	playlist := &M3U8Playlist{
-		BaseURL:   baseURL.String(),
-		Segments:  make([]string, 0),
-		IsStream:  false,
-		Encrypted: false,
-		CustomKey: customKey,
+		BaseURL:       baseURL.String(),
+		Segments:      make([]string, 0),
+		AudioSegments: make([]string, 0),
+		IsStream:      false,
+		Encrypted:     false,
+		CustomKey:     customKey,
+		HasAudio:      false,
 	}
+
+	// Track audio media declaration
+	var audioMediaURL string
 
 	// Parse the playlist content
 	scanner := bufio.NewScanner(reader)
@@ -122,6 +132,25 @@ func parseM3U8Content(reader io.Reader, baseURL *url.URL, customKey []byte) (*M3
 
 		// Skip empty lines
 		if line == "" {
+			continue
+		}
+
+		// Check for separate audio media (#EXT-X-MEDIA:TYPE=AUDIO)
+		if strings.HasPrefix(line, "#EXT-X-MEDIA:") && strings.Contains(line, "TYPE=AUDIO") {
+			_, audioMediaURL = parseMediaTag(line, baseURL)
+			if audioMediaURL != "" {
+				playlist.HasAudio = true
+				fmt.Printf("Separate audio track detected: %s\n", audioMediaURL)
+			}
+			continue
+		}
+
+		// Check for initialization segment (fMP4 format)
+		if strings.HasPrefix(line, "#EXT-X-MAP:") {
+			err := parseMapTag(line, baseURL, playlist)
+			if err != nil {
+				fmt.Printf("Warning: failed to parse MAP tag: %v\n", err)
+			}
 			continue
 		}
 
@@ -160,10 +189,29 @@ func parseM3U8Content(reader io.Reader, baseURL *url.URL, customKey []byte) (*M3
 		return nil, fmt.Errorf("error reading playlist: %w", err)
 	}
 
-	// If it's a master playlist, we need to download the first variant
+	// If it's a master playlist, parse video and audio variants
 	if playlist.IsStream && len(playlist.Segments) > 0 {
-		fmt.Printf("Master playlist detected, using first variant: %s\n", playlist.Segments[0])
-		return ParseM3U8WithKey(playlist.Segments[0], customKey)
+		fmt.Printf("Master playlist detected, using first video variant: %s\n", playlist.Segments[0])
+		videoPlaylist, err := ParseM3U8WithKey(playlist.Segments[0], customKey)
+		if err != nil {
+			return nil, err
+		}
+
+		// If there's a separate audio track, download it too
+		if audioMediaURL != "" {
+			fmt.Printf("Downloading separate audio playlist: %s\n", audioMediaURL)
+			audioPlaylist, err := ParseM3U8WithKey(audioMediaURL, customKey)
+			if err != nil {
+				fmt.Printf("Warning: failed to parse audio playlist: %v\n", err)
+			} else {
+				videoPlaylist.HasAudio = true
+				videoPlaylist.AudioSegments = audioPlaylist.Segments
+				videoPlaylist.AudioInit = audioPlaylist.InitSegment
+				fmt.Printf("✓ Found %d audio segments\n", len(audioPlaylist.Segments))
+			}
+		}
+
+		return videoPlaylist, nil
 	}
 
 	if len(playlist.Segments) == 0 {
@@ -197,6 +245,66 @@ func isAbsoluteURL(urlStr string) bool {
 		return false
 	}
 	return parsed.Scheme != ""
+}
+
+// parseMediaTag parses the #EXT-X-MEDIA tag to extract audio track URL
+func parseMediaTag(line string, baseURL *url.URL) (string, string) {
+	// Example: #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",URI="audio.m3u8"
+
+	// Extract GROUP-ID
+	groupID := ""
+	groupStart := strings.Index(line, "GROUP-ID=\"")
+	if groupStart != -1 {
+		groupStart += 10 // Move past GROUP-ID="
+		groupEnd := strings.Index(line[groupStart:], "\"")
+		if groupEnd != -1 {
+			groupID = line[groupStart : groupStart+groupEnd]
+		}
+	}
+
+	// Extract URI
+	uriStart := strings.Index(line, "URI=\"")
+	if uriStart == -1 {
+		return groupID, "" // No URI, might be default audio
+	}
+	uriStart += 5 // Move past URI="
+	uriEnd := strings.Index(line[uriStart:], "\"")
+	if uriEnd == -1 {
+		return groupID, ""
+	}
+	mediaURI := line[uriStart : uriStart+uriEnd]
+
+	// Resolve relative URL
+	audioURL := resolveURL(baseURL, mediaURI)
+
+	return groupID, audioURL
+}
+
+// parseMapTag parses the #EXT-X-MAP tag to extract initialization segment (fMP4)
+func parseMapTag(line string, baseURL *url.URL, playlist *M3U8Playlist) error {
+	// Example: #EXT-X-MAP:URI="init.mp4"
+	// or: #EXT-X-MAP:URI="/path/to/init.mp4",BYTERANGE="652@0"
+
+	playlist.IsFragmented = true
+
+	// Extract URI
+	uriStart := strings.Index(line, "URI=\"")
+	if uriStart == -1 {
+		return fmt.Errorf("no URI found in MAP tag")
+	}
+	uriStart += 5 // Move past URI="
+	uriEnd := strings.Index(line[uriStart:], "\"")
+	if uriEnd == -1 {
+		return fmt.Errorf("malformed URI in MAP tag")
+	}
+	mapURI := line[uriStart : uriStart+uriEnd]
+
+	// Resolve relative URL
+	playlist.InitSegment = resolveURL(baseURL, mapURI)
+
+	fmt.Printf("Fragmented MP4 detected, initialization segment: %s\n", playlist.InitSegment)
+
+	return nil
 }
 
 // parseKeyTag parses the #EXT-X-KEY tag to extract encryption information

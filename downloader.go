@@ -83,6 +83,14 @@ func (d *Downloader) checkAndSwitchToDisk(newDataSize int) error {
 // DownloadSegments downloads all segments concurrently
 func (d *Downloader) DownloadSegments(segments []string) ([]SegmentData, error) {
 	d.total = len(segments)
+
+	// For fMP4, just note that we'll handle init segment during merge
+	if d.playlist.IsFragmented && d.playlist.InitSegment != "" {
+		fmt.Printf("ℹ️  Fragmented MP4 format detected\n")
+		fmt.Printf("   Initialization segment: %s\n", d.playlist.InitSegment)
+		fmt.Printf("   Media segments: %d\n", len(segments))
+	}
+
 	results := make([]SegmentData, len(segments))
 
 	// Create a semaphore to limit concurrent downloads

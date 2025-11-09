@@ -5,6 +5,13 @@ A simple and efficient Go application to download M3U8 streaming videos from a g
 ## Features
 
 - ✅ Parse M3U8 playlists (both master and media playlists)
+- ✅ **Support for both TS and fMP4 formats**
+  - Traditional MPEG-TS (.ts segments)
+  - Fragmented MP4 (.m4s segments with #EXT-X-MAP)
+- ✅ **Separate audio track support** (#EXT-X-MEDIA:TYPE=AUDIO)
+  - Automatically detects separate audio streams
+  - Downloads video and audio in parallel
+  - Merges them using ffmpeg
 - ✅ Support for local M3U8 files with base URL resolution
 - ✅ AES-128 encryption support (automatic decryption)
 - ✅ Custom encryption key support (for protected keys)
@@ -110,7 +117,66 @@ m3u8-downloader.exe -url "https://example.com/playlist.m3u8" -output "video.ts" 
 
 ## Output Format
 
-The application supports both `.ts` (MPEG Transport Stream) and `.mp4` output formats.
+The application supports both `.ts` (MPEG Transport Stream) and `.mp4` output formats, and automatically handles different M3U8 playlist types:
+
+### Traditional TS Format (MPEG-TS segments)
+Playlists with `.ts` segments:
+```m3u8
+#EXTM3U
+#EXTINF:10.0,
+segment0.ts
+#EXTINF:10.0,
+segment1.ts
+```
+
+**Output options:**
+- `.ts` output: Direct concatenation (fast)
+- `.mp4` output: Converts via ffmpeg (requires conversion)
+
+### Fragmented MP4 Format (fMP4)
+Playlists with `#EXT-X-MAP` and `.m4s` segments:
+```m3u8
+#EXTM3U
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:3.0,
+segment0.m4s
+#EXTINF:3.0,
+segment1.m4s
+```
+
+**Output behavior:**
+- Automatically detects fMP4 format
+- Downloads initialization segment + media segments
+- Outputs directly to `.mp4` (no ffmpeg needed!)
+- If you specify `.ts` extension, it will be changed to `.mp4`
+
+### Separate Audio Tracks
+Master playlists with separate audio:
+```m3u8
+#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",URI="audio.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,AUDIO="audio"
+video.m3u8
+```
+
+**Automatic handling:**
+- Detects `#EXT-X-MEDIA:TYPE=AUDIO` in master playlist
+- Downloads video and audio streams separately
+- Merges them using ffmpeg (requires ffmpeg)
+- Creates single MP4 file with both tracks
+
+### Usage Examples
+
+```bash
+# Traditional TS format - output as TS
+m3u8-downloader.exe -url "https://example.com/playlist.m3u8" -output "video.ts"
+
+# Traditional TS format - convert to MP4
+m3u8-downloader.exe -url "https://example.com/playlist.m3u8" -output "video.mp4"
+
+# Fragmented MP4 - direct output (no conversion needed)
+m3u8-downloader.exe -url "https://example.com/fmp4_playlist.m3u8" -output "video.mp4"
+```
 
 ### TS Output (default)
 ```bash
@@ -123,17 +189,37 @@ m3u8-downloader.exe -url "https://example.com/playlist.m3u8" -output "video.mp4"
 ```
 
 **Automatic ffmpeg Download (Windows only):**
-- If ffmpeg is not found, the application will offer to download it automatically
+- For **traditional TS format** converted to MP4, ffmpeg is required
+- For **fragmented MP4 (fMP4)** with separate audio, ffmpeg is required for merging
+- For **fragmented MP4 (fMP4)** without separate audio, no ffmpeg needed - direct output!
+- If ffmpeg is not found (when needed), the application will offer to download it automatically
 - Downloaded ffmpeg is placed in a local `ffmpeg/` directory
 - No system-wide installation required
 - For macOS/Linux, you'll need to install ffmpeg manually
 
-The application will:
-1. Check if ffmpeg is available in PATH or local `ffmpeg/` directory
-2. If not found, prompt you to download it automatically (Windows only)
-3. Download and merge segments into a temporary TS file
-4. Convert the TS file to MP4 using `ffmpeg -c copy` (fast, no re-encoding)
-5. Remove the temporary TS file
+### Format Detection
+
+The application automatically detects the playlist format:
+- **TS format**: Segments end with `.ts`
+- **fMP4 format**: Contains `#EXT-X-MAP:` tag with `.mp4`, `.m4s`, or `.m4v` segments
+- **Separate audio**: Master playlist with `#EXT-X-MEDIA:TYPE=AUDIO`
+
+**TS to MP4 conversion workflow:**
+1. Download and merge TS segments
+2. Convert to MP4 using `ffmpeg -c copy` (fast, no re-encoding)
+3. Remove temporary TS file
+
+**fMP4 workflow (no separate audio):**
+1. Download initialization segment (#EXT-X-MAP)
+2. Download media segments (.m4s)
+3. Concatenate: init + segments = final MP4
+4. No conversion needed!
+
+**fMP4 workflow (with separate audio):**
+1. Download video: init + segments
+2. Download audio: init + segments
+3. Merge video and audio using `ffmpeg -c copy`
+4. Remove temporary video/audio files
 
 Both formats can be played by most video players including:
 - VLC Media Player

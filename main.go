@@ -119,53 +119,138 @@ func main() {
 	}
 	fmt.Println()
 
-	// Step 2: Download all segments
+	// Step 2: Download video segments
+	fmt.Println("Downloading video segments...")
 	downloader := NewDownloader(*concurrent, playlist, *retries)
-	segments, err := downloader.DownloadSegments(playlist.Segments)
+	videoSegments, err := downloader.DownloadSegments(playlist.Segments)
 	if err != nil {
-		fmt.Printf("Error downloading segments: %v\n", err)
+		fmt.Printf("Error downloading video segments: %v\n", err)
 		downloader.CleanupTempFiles()
 		os.Exit(1)
+	}
+
+	// Step 2.5: Download audio segments if separate audio track exists
+	var audioSegments []SegmentData
+	var audioDownloader *Downloader
+	if playlist.HasAudio && len(playlist.AudioSegments) > 0 {
+		fmt.Println()
+		fmt.Println("Downloading audio segments...")
+		audioDownloader = NewDownloader(*concurrent, playlist, *retries)
+		audioSegments, err = audioDownloader.DownloadSegments(playlist.AudioSegments)
+		if err != nil {
+			fmt.Printf("Error downloading audio segments: %v\n", err)
+			downloader.CleanupTempFiles()
+			audioDownloader.CleanupTempFiles()
+			os.Exit(1)
+		}
 	}
 
 	fmt.Println()
 
 	// Step 3: Merge segments into output file
-	// If output is MP4, create a temporary TS file first
+	// Determine output format
 	isMP4 := strings.HasSuffix(*output, ".mp4")
 	finalOutput := *output
-	var tsFile string
+	var tempVideoFile string
+	var tempAudioFile string
 
-	if isMP4 {
-		// Create temporary TS file
-		tsFile = strings.TrimSuffix(*output, ".mp4") + "_temp.ts"
-		fmt.Printf("Creating temporary TS file: %s\n", tsFile)
-		err = MergeSegments(segments, tsFile)
+	// For fMP4 format, output directly to MP4 (no conversion needed)
+	// For TS format with MP4 output, create temporary TS file first
+	if playlist.IsFragmented {
+		// fMP4 format - segments are already MP4
+		if !isMP4 {
+			// User wants .ts but we have fMP4 - convert extension
+			fmt.Println("⚠️  Fragmented MP4 format detected - output will be .mp4")
+			finalOutput = strings.TrimSuffix(*output, filepath.Ext(*output)) + ".mp4"
+		}
+
+		// Merge video
+		tempVideoFile = strings.TrimSuffix(finalOutput, ".mp4") + "_video.mp4"
+		err = MergeSegmentsWithInit(videoSegments, downloader, tempVideoFile)
+		if err != nil {
+			fmt.Printf("Error merging video segments: %v\n", err)
+			downloader.CleanupTempFiles()
+			if audioDownloader != nil {
+				audioDownloader.CleanupTempFiles()
+			}
+			os.Exit(1)
+		}
+
+		// Merge audio if exists
+		if playlist.HasAudio && len(audioSegments) > 0 {
+			tempAudioFile = strings.TrimSuffix(finalOutput, ".mp4") + "_audio.mp4"
+			// Create a modified playlist for audio init segment
+			audioPlaylist := *playlist
+			audioPlaylist.InitSegment = playlist.AudioInit
+			audioDownloader.playlist = &audioPlaylist
+			err = MergeSegmentsWithInit(audioSegments, audioDownloader, tempAudioFile)
+			if err != nil {
+				fmt.Printf("Error merging audio segments: %v\n", err)
+				downloader.CleanupTempFiles()
+				audioDownloader.CleanupTempFiles()
+				os.Remove(tempVideoFile)
+				os.Exit(1)
+			}
+		}
 	} else {
-		err = MergeSegments(segments, *output)
-	}
-
-	if err != nil {
-		fmt.Printf("Error merging segments: %v\n", err)
-		downloader.CleanupTempFiles()
-		os.Exit(1)
+		// Traditional TS format
+		if isMP4 {
+			// Create temporary TS file for conversion
+			tempVideoFile = strings.TrimSuffix(*output, ".mp4") + "_temp.ts"
+			fmt.Printf("Creating temporary TS file: %s\n", tempVideoFile)
+			err = MergeSegments(videoSegments, tempVideoFile)
+		} else {
+			err = MergeSegments(videoSegments, *output)
+		}
+		if err != nil {
+			fmt.Printf("Error merging segments: %v\n", err)
+			downloader.CleanupTempFiles()
+			if audioDownloader != nil {
+				audioDownloader.CleanupTempFiles()
+			}
+			os.Exit(1)
+		}
 	}
 
 	// Clean up temporary segment files after successful merge
 	downloader.CleanupTempFiles()
+	if audioDownloader != nil {
+		audioDownloader.CleanupTempFiles()
+	}
 
-	// Step 4: Convert to MP4 if needed
-	if isMP4 {
+	// Step 4: Convert/Merge to final output
+	if playlist.IsFragmented {
+		// fMP4: Merge video and audio using ffmpeg if audio exists
+		if playlist.HasAudio && tempAudioFile != "" {
+			fmt.Printf("\nMerging video and audio using ffmpeg...\n")
+			err = mergeVideoAudio(tempVideoFile, tempAudioFile, finalOutput)
+			if err != nil {
+				fmt.Printf("Error merging video and audio: %v\n", err)
+				fmt.Printf("Temporary files kept:\n  Video: %s\n  Audio: %s\n", tempVideoFile, tempAudioFile)
+				os.Exit(1)
+			}
+			// Remove temporary files
+			os.Remove(tempVideoFile)
+			os.Remove(tempAudioFile)
+			fmt.Printf("Temporary video and audio files removed\n")
+		} else {
+			// No separate audio, rename video file to final output
+			if tempVideoFile != finalOutput {
+				os.Rename(tempVideoFile, finalOutput)
+			}
+		}
+	} else if isMP4 {
+		// TS to MP4 conversion
 		fmt.Printf("\nConverting TS to MP4 using ffmpeg...\n")
-		err = convertToMP4(tsFile, finalOutput)
+		err = convertToMP4(tempVideoFile, finalOutput)
 		if err != nil {
 			fmt.Printf("Error converting to MP4: %v\n", err)
-			fmt.Printf("Temporary TS file kept at: %s\n", tsFile)
+			fmt.Printf("Temporary TS file kept at: %s\n", tempVideoFile)
 			os.Exit(1)
 		}
 
 		// Remove temporary TS file
-		os.Remove(tsFile)
+		os.Remove(tempVideoFile)
 		fmt.Printf("Temporary TS file removed\n")
 	}
 
@@ -177,6 +262,29 @@ func main() {
 
 	absPath, _ := filepath.Abs(finalOutput)
 	fmt.Printf("\nDownload complete! File saved to:\n%s\n", absPath)
+}
+
+// mergeVideoAudio uses ffmpeg to merge separate video and audio files
+func mergeVideoAudio(videoFile, audioFile, outputFile string) error {
+	// Ensure ffmpeg is available (download if necessary)
+	ffmpegPath, err := ensureFFmpeg()
+	if err != nil {
+		return err
+	}
+
+	// Merge video and audio using ffmpeg
+	// -i: input files (video and audio)
+	// -c copy: copy streams without re-encoding (fast)
+	// -y: overwrite output file
+	cmd := exec.Command(ffmpegPath, "-i", videoFile, "-i", audioFile, "-c", "copy", "-y", outputFile)
+
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ffmpeg merge failed: %w\nOutput: %s", err, string(output))
+	}
+
+	fmt.Println("✓ Video and audio merged successfully")
+	return nil
 }
 
 // convertToMP4 uses ffmpeg to convert TS to MP4
