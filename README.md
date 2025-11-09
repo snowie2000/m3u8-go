@@ -7,12 +7,16 @@ A simple and efficient Go application to download M3U8 streaming videos from a g
 - ✅ Parse M3U8 playlists (both master and media playlists)
 - ✅ Support for local M3U8 files with base URL resolution
 - ✅ AES-128 encryption support (automatic decryption)
+- ✅ Custom encryption key support (for protected keys)
+- ✅ Custom HTTP headers (User-Agent, Referer, etc.)
+- ✅ **Smart memory management** (auto-switches to disk for large downloads)
 - ✅ Concurrent segment downloads for faster performance
 - ✅ Automatic retry with exponential backoff for failed downloads
 - ✅ Configurable timeout for slow connections
 - ✅ Progress tracking during download
 - ✅ Automatic URL resolution for relative paths
 - ✅ Merge segments into a single video file
+- ✅ MP4 conversion with automatic ffmpeg download (Windows)
 - ✅ Simple command-line interface
 
 ## Installation
@@ -75,6 +79,8 @@ m3u8-downloader.exe -url "https://example.com/playlist.m3u8" -output "video.ts" 
 | `-concurrent` | Maximum concurrent downloads | `10` |
 | `-retries` | Maximum retry attempts for failed downloads | `3` |
 | `-timeout` | Timeout in seconds for HTTP requests | `30` |
+| `-key` | Path to custom encryption key file (overrides key URL in M3U8) | - |
+| `-header` | Custom HTTP header in format `Key:Value` (can be specified multiple times) | - |
 
 ## How It Works
 
@@ -87,15 +93,20 @@ m3u8-downloader.exe -url "https://example.com/playlist.m3u8" -output "video.ts" 
 2. **Download Segments**: Downloads all video segments concurrently
    - Uses goroutines for parallel downloads
    - Limits concurrent connections to avoid overwhelming the server
+   - **Smart memory management**: 
+     - Small downloads (< 50MB): Stores segments in memory for speed
+     - Large downloads (≥ 50MB): Automatically switches to temporary disk storage to prevent memory issues
    - Automatically retries failed downloads with exponential backoff
    - Configurable timeout to handle slow connections
    - Automatically decrypts AES-128 encrypted segments
-   - Shows real-time progress
+   - Shows real-time progress with download size
 
 3. **Merge Segments**: Combines all segments into a single file
+   - Handles both memory-stored and disk-stored segments transparently
    - Maintains the correct segment order
    - Preserves TS packet structure after decryption
    - Outputs a transport stream (.ts) file
+   - Automatically cleans up temporary files
 
 ## Output Format
 
@@ -160,6 +171,15 @@ go run . -url "https://slow-server.com/stream.m3u8" -timeout 60 -retries 5
 
 # Example 7: Download and convert to MP4 automatically
 go run . -url "https://example.com/playlist.m3u8" -output "video.mp4"
+
+# Example 8: Use custom encryption key (when key URL is protected)
+go run . -url "https://example.com/playlist.m3u8" -key "my_key.key" -output "video.ts"
+
+# Example 9: Add custom headers (for protected content)
+go run . -url "https://example.com/playlist.m3u8" -header "User-Agent:Mozilla/5.0" -header "Referer:https://example.com"
+
+# Example 10: Combined - custom key and headers
+go run . -url "https://example.com/playlist.m3u8" -key "decryption.key" -header "User-Agent:Chrome/120.0" -header "Origin:https://example.com" -output "video.mp4"
 ```
 
 ## Project Structure
@@ -176,6 +196,20 @@ m3u8-go/
 ```
 
 ## Troubleshooting
+
+### Issue: "Failed to download encryption key"
+- The encryption key URL might be protected or require special headers
+- Use `-key` flag to provide a custom encryption key file that you've downloaded manually
+- Example: `-key "my_key.key"`
+
+### Issue: "403 Forbidden" or authentication errors
+- The server might require specific headers (User-Agent, Referer, Origin, etc.)
+- Use `-header` flag to specify custom HTTP headers (can be used multiple times)
+- Example: `-header "User-Agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" -header "Referer:https://example.com"`
+- Common headers to try:
+  - `User-Agent`: Pretend to be a web browser
+  - `Referer`: The website URL where the video is embedded
+  - `Origin`: The domain of the website
 
 ### Issue: "No segments found in playlist"
 - Make sure the URL points to a valid M3U8 file
@@ -203,7 +237,10 @@ m3u8-go/
 
 ## Notes
 
-- The application downloads all segments into memory before merging, so ensure you have sufficient RAM for large videos
+- **Memory Management**: The application intelligently manages memory:
+  - Downloads under 50MB are stored in memory for maximum speed
+  - Downloads 50MB and larger automatically switch to disk storage to prevent memory issues
+  - Temporary files are automatically cleaned up after merging
 - Some M3U8 streams may be protected by DRM or require authentication, which this tool does not currently support
 - Always respect copyright and terms of service when downloading videos
 

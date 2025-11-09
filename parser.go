@@ -16,7 +16,15 @@ var (
 	httpClient = &http.Client{
 		Timeout: 30 * time.Second,
 	}
+
+	// Custom headers to include in all HTTP requests
+	customHeaders map[string]string
 )
+
+// SetCustomHeaders sets custom headers to be included in all HTTP requests
+func SetCustomHeaders(headers map[string]string) {
+	customHeaders = headers
+}
 
 // M3U8Playlist represents the parsed M3U8 playlist
 type M3U8Playlist struct {
@@ -27,12 +35,28 @@ type M3U8Playlist struct {
 	KeyURL    string
 	KeyIV     string
 	Key       []byte
+	CustomKey []byte // Custom key provided by user (skips download)
 }
 
 // ParseM3U8 downloads and parses the M3U8 playlist from the given URL
 func ParseM3U8(playlistURL string) (*M3U8Playlist, error) {
+	return ParseM3U8WithKey(playlistURL, nil)
+}
+
+// ParseM3U8WithKey downloads and parses the M3U8 playlist with optional custom key
+func ParseM3U8WithKey(playlistURL string, customKey []byte) (*M3U8Playlist, error) {
 	// Download the playlist
-	resp, err := httpClient.Get(playlistURL)
+	req, err := http.NewRequest("GET", playlistURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Add custom headers
+	for key, value := range customHeaders {
+		req.Header.Set(key, value)
+	}
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download playlist: %w", err)
 	}
@@ -48,11 +72,16 @@ func ParseM3U8(playlistURL string) (*M3U8Playlist, error) {
 		return nil, fmt.Errorf("failed to parse playlist URL: %w", err)
 	}
 
-	return parseM3U8Content(resp.Body, baseURL)
+	return parseM3U8Content(resp.Body, baseURL, customKey)
 }
 
 // ParseM3U8FromFile parses a local M3U8 file with a provided base URL
 func ParseM3U8FromFile(filePath string, baseURLStr string) (*M3U8Playlist, error) {
+	return ParseM3U8FromFileWithKey(filePath, baseURLStr, nil)
+}
+
+// ParseM3U8FromFileWithKey parses a local M3U8 file with optional custom key
+func ParseM3U8FromFileWithKey(filePath string, baseURLStr string, customKey []byte) (*M3U8Playlist, error) {
 	// Open the local file
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -73,16 +102,17 @@ func ParseM3U8FromFile(filePath string, baseURLStr string) (*M3U8Playlist, error
 		baseURL, _ = url.Parse("file://local")
 	}
 
-	return parseM3U8Content(file, baseURL)
+	return parseM3U8Content(file, baseURL, customKey)
 }
 
 // parseM3U8Content parses M3U8 content from an io.Reader
-func parseM3U8Content(reader io.Reader, baseURL *url.URL) (*M3U8Playlist, error) {
+func parseM3U8Content(reader io.Reader, baseURL *url.URL, customKey []byte) (*M3U8Playlist, error) {
 	playlist := &M3U8Playlist{
 		BaseURL:   baseURL.String(),
 		Segments:  make([]string, 0),
 		IsStream:  false,
 		Encrypted: false,
+		CustomKey: customKey,
 	}
 
 	// Parse the playlist content
@@ -133,11 +163,17 @@ func parseM3U8Content(reader io.Reader, baseURL *url.URL) (*M3U8Playlist, error)
 	// If it's a master playlist, we need to download the first variant
 	if playlist.IsStream && len(playlist.Segments) > 0 {
 		fmt.Printf("Master playlist detected, using first variant: %s\n", playlist.Segments[0])
-		return ParseM3U8(playlist.Segments[0])
+		return ParseM3U8WithKey(playlist.Segments[0], customKey)
 	}
 
 	if len(playlist.Segments) == 0 {
 		return nil, fmt.Errorf("no segments found in playlist")
+	}
+
+	// If custom key was provided, use it instead of the downloaded key
+	if customKey != nil && playlist.Encrypted {
+		playlist.Key = customKey
+		fmt.Println("✓ Using custom encryption key (skipped key download)")
 	}
 
 	return playlist, nil
@@ -203,26 +239,41 @@ func parseKeyTag(line string, baseURL *url.URL, playlist *M3U8Playlist) error {
 		}
 	}
 
-	// Download the encryption key
-	fmt.Printf("Downloading encryption key from: %s\n", playlist.KeyURL)
-	key, err := DownloadContent(playlist.KeyURL)
-	if err != nil {
-		return fmt.Errorf("failed to download encryption key: %w", err)
-	}
+	// Only download the encryption key if custom key is not provided
+	if playlist.CustomKey == nil {
+		// Download the encryption key
+		fmt.Printf("Downloading encryption key from: %s\n", playlist.KeyURL)
+		key, err := DownloadContent(playlist.KeyURL)
+		if err != nil {
+			return fmt.Errorf("failed to download encryption key: %w", err)
+		}
 
-	if len(key) != 16 {
-		return fmt.Errorf("invalid key length: expected 16 bytes, got %d", len(key))
-	}
+		if len(key) != 16 {
+			return fmt.Errorf("invalid key length: expected 16 bytes, got %d", len(key))
+		}
 
-	playlist.Key = key
-	fmt.Println("Encryption key downloaded successfully")
+		playlist.Key = key
+		fmt.Println("Encryption key downloaded successfully")
+	} else {
+		fmt.Println("Encryption detected, will use custom key (skipping download)")
+	}
 
 	return nil
 }
 
 // DownloadContent downloads content from a URL and returns it as bytes
 func DownloadContent(url string) ([]byte, error) {
-	resp, err := httpClient.Get(url)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Add custom headers
+	for key, value := range customHeaders {
+		req.Header.Set(key, value)
+	}
+
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
