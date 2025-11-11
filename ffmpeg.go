@@ -10,11 +10,38 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const (
 	ffmpegDir = "ffmpeg"
 )
+
+// progressReader wraps an io.Reader to report progress
+type progressReader struct {
+	reader      io.Reader
+	total       int64
+	downloaded  int64
+	lastPercent int
+}
+
+func (pr *progressReader) Read(p []byte) (int, error) {
+	n, err := pr.reader.Read(p)
+	pr.downloaded += int64(n)
+
+	if pr.total > 0 {
+		percent := int(float64(pr.downloaded) / float64(pr.total) * 100)
+		if percent != pr.lastPercent && percent%5 == 0 { // Update every 5%
+			fmt.Printf("\rDownloading ffmpeg: %d%% (%.2f MB / %.2f MB)",
+				percent,
+				float64(pr.downloaded)/(1024*1024),
+				float64(pr.total)/(1024*1024))
+			pr.lastPercent = percent
+		}
+	}
+
+	return n, err
+}
 
 // getFFmpegPath returns the path to ffmpeg executable
 func getFFmpegPath() string {
@@ -96,9 +123,14 @@ func downloadFFmpeg() error {
 		return fmt.Errorf("failed to create ffmpeg directory: %w", err)
 	}
 
+	// Create a dedicated HTTP client for ffmpeg download with longer timeout
+	ffmpegClient := &http.Client{
+		Timeout: 30 * time.Minute, // 30 minutes for large download
+	}
+
 	// Download the file
 	fmt.Printf("Downloading from: %s\n", downloadURL)
-	resp, err := httpClient.Get(downloadURL)
+	resp, err := ffmpegClient.Get(downloadURL)
 	if err != nil {
 		return fmt.Errorf("failed to download: %w", err)
 	}
@@ -107,6 +139,9 @@ func downloadFFmpeg() error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("download failed with status: %d", resp.StatusCode)
 	}
+
+	// Get content length for progress tracking
+	contentLength := resp.ContentLength
 
 	// Save to temporary file
 	tmpFile := filepath.Join(ffmpegDir, "ffmpeg_download.zip")
@@ -117,8 +152,18 @@ func downloadFFmpeg() error {
 
 	// Download with progress
 	fmt.Println("Downloading ffmpeg (this may take a few minutes)...")
-	_, err = io.Copy(out, resp.Body)
+
+	// Create progress reader
+	progressReader := &progressReader{
+		reader: resp.Body,
+		total:  contentLength,
+	}
+
+	_, err = io.Copy(out, progressReader)
 	out.Close()
+
+	fmt.Println() // New line after progress
+
 	if err != nil {
 		return fmt.Errorf("failed to save download: %w", err)
 	}

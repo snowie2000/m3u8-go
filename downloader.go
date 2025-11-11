@@ -60,13 +60,11 @@ func (d *Downloader) checkAndSwitchToDisk(newDataSize int) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	if d.useDiskStorage {
-		return nil // Already using disk
-	}
-
+	// Always update total size regardless of storage mode
 	d.totalSize += int64(newDataSize)
 
-	if d.totalSize > MemoryThreshold {
+	// Check if we need to switch to disk storage
+	if !d.useDiskStorage && d.totalSize > MemoryThreshold {
 		// Create temp directory for segments
 		tempDir, err := os.MkdirTemp("", "m3u8-segments-*")
 		if err != nil {
